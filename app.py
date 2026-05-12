@@ -434,7 +434,10 @@ with st.sidebar:
         st.session_state.history = []
         st.rerun()
     st.markdown("---")
-    st.markdown("<small style='color:#475569'>Refresh notes after adding new wiki entries: run `python ingest.py`</small>", unsafe_allow_html=True)
+    st.markdown("**อัปเดต Wiki**")
+    st.markdown("<small style='color:#475569'>เมื่อเพิ่ม/แก้ไข notes ใน Obsidian ให้รันใน Terminal:</small>", unsafe_allow_html=True)
+    st.code("cd ~/GC_External_Factor/wiki-qa\n./update_wiki.sh", language="bash")
+    st.markdown("<small style='color:#475569'>จากนั้นรอ ~2 นาที Streamlit จะ redeploy อัตโนมัติ</small>", unsafe_allow_html=True)
 
 # Header
 st.markdown("""
