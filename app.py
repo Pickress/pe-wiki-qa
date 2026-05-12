@@ -30,13 +30,17 @@ Instructions:
 - If asked for comparison, present it as a table"""
 
 TRANSLATE_PROMPT = """You are a search query optimizer for a PE resin and flexible packaging intelligence wiki.
-Convert the user's question (may be in Thai or English) into a short English search query (5-10 keywords) that will best retrieve relevant wiki notes.
-Focus on TECHNICAL TERMS and TOPICS — not the question structure.
+Convert the user's question (may be in Thai or English) into TWO separate search queries as JSON:
+- "entity": the specific company/product/regulation name (1-3 words max), or empty string if none
+- "topic": the technical topic keywords (4-8 words)
+
 Examples:
-  "MDOPE มีกี่ segment" → "MDO-PE market segments applications food packaging industrial"
-  "ExxonMobil ทำอะไรบ้าง" → "ExxonMobil PE resin strategy patents BOCD mLLDPE"
-  "PPWR deadline เมื่อไหร่" → "PPWR regulation deadline 2030 recyclability requirement"
-Output ONLY the search keywords — no explanation, no preamble."""
+  "ExxonMobil ที่เกี่ยวกับ lamination" → {"entity": "ExxonMobil", "topic": "lamination film PE sealant adhesive structure"}
+  "MDOPE มีกี่ segment" → {"entity": "", "topic": "MDO-PE market segments applications food packaging industrial"}
+  "Borealis PPWR strategy" → {"entity": "Borealis", "topic": "PPWR regulation recyclability mono-PE strategy"}
+  "PPWR deadline" → {"entity": "PPWR", "topic": "regulation deadline 2030 recyclability requirement packaging"}
+
+Output ONLY valid JSON — no explanation, no preamble."""
 
 STOP_WORDS = {"how","many","what","does","have","the","and","for","are","with","this","that","from","into"}
 
@@ -275,12 +279,19 @@ def get_claude():
     return anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
 
-def translate_to_english(client, question: str) -> str:
+def translate_to_english(client, question: str) -> dict:
+    """Returns {"entity": "...", "topic": "..."} for two-phase search."""
+    import json
     resp = client.messages.create(
         model=MODEL, max_tokens=200, system=TRANSLATE_PROMPT,
         messages=[{"role": "user", "content": question}],
     )
-    return resp.content[0].text.strip()
+    text = resp.content[0].text.strip()
+    try:
+        result = json.loads(text)
+        return {"entity": result.get("entity", ""), "topic": result.get("topic", text)}
+    except Exception:
+        return {"entity": "", "topic": text}
 
 
 def is_stub(doc: str) -> bool:
@@ -305,25 +316,39 @@ def keyword_search(col, keywords: list[str], n: int = 20) -> list[dict]:
     return scored[:n]
 
 
-def search_wiki(col, query_en: str, query_original: str, n: int = N_RESULTS) -> list[dict]:
-    vec_results = col.query(query_texts=[query_en], n_results=n * 2)
-    vec_items = {}
+def search_wiki(col, query: dict, query_original: str, n: int = N_RESULTS) -> list[dict]:
+    """Two-phase hybrid search: entity notes first, then topic notes."""
+    entity = query.get("entity", "")
+    topic = query.get("topic", "")
+    full_query = f"{entity} {topic}".strip()
+
+    merged = {}
+
+    # Phase 1: entity keyword search (force-include notes mentioning the entity)
+    if entity and len(entity) > 2:
+        entity_hits = keyword_search(col, [entity], n=8)
+        for item in entity_hits:
+            merged[item["id"]] = item
+
+    # Phase 2: vector search on full query
+    vec_results = col.query(query_texts=[full_query], n_results=n * 2)
     for i in range(len(vec_results["ids"][0])):
         doc_id = vec_results["ids"][0][i]
         doc = vec_results["documents"][0][i]
-        if is_stub(doc):
+        if is_stub(doc) or doc_id in merged:
             continue
-        vec_items[doc_id] = {
+        merged[doc_id] = {
             "id": doc_id, "text": doc,
             "meta": vec_results["metadatas"][0][i],
             "distance": vec_results["distances"][0][i],
         }
-    keywords = [w for w in query_en.replace("-", " ").split() if len(w) > 3]
-    kw_items = {item["id"]: item for item in keyword_search(col, keywords, n=n)}
-    merged = dict(vec_items)
-    for doc_id, item in kw_items.items():
-        if doc_id not in merged:
-            merged[doc_id] = item
+
+    # Phase 3: topic keyword search
+    topic_kws = [w for w in topic.replace("-", " ").split() if len(w) > 3]
+    for item in keyword_search(col, topic_kws, n=n):
+        if item["id"] not in merged:
+            merged[item["id"]] = item
+
     return list(merged.values())[:n]
 
 
@@ -466,14 +491,17 @@ if question:
 
     with st.chat_message("assistant"):
         with st.spinner("กำลังวิเคราะห์คำถาม..."):
-            query_en = translate_to_english(claude, question)
+            query = translate_to_english(claude, question)
+            entity = query.get("entity", "")
+            topic = query.get("topic", "")
+            query_label = f"{entity} · {topic}" if entity else topic
 
-        with st.spinner(f"ค้นหาใน wiki..."):
-            hits = search_wiki(col, query_en, question)
+        with st.spinner("ค้นหาใน wiki..."):
+            hits = search_wiki(col, query, question)
             context = build_context(hits)
 
         with st.spinner("สังเคราะห์คำตอบ..."):
-            answer = ask_claude(claude, question, query_en, context)
+            answer = ask_claude(claude, question, query_label, context)
 
         st.markdown(f'<div class="answer-card">{answer}</div>', unsafe_allow_html=True)
 
@@ -481,12 +509,12 @@ if question:
         with st.expander(f"Sources — {len(hits)} notes"):
             st.markdown(sources_html, unsafe_allow_html=True)
 
-        st.markdown(f'<div class="query-pill">🔍 Search: <span>{query_en}</span></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="query-pill">🔍 Search: <span>{query_label}</span></div>', unsafe_allow_html=True)
 
     st.session_state.history.append({
         "role": "assistant",
         "content": answer,
-        "query_en": query_en,
+        "query_en": query_label,
         "sources_html": sources_html,
         "source_count": len(hits),
     })
