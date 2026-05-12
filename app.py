@@ -241,12 +241,27 @@ html, body, [class*="css"] {
 .api-box h3 { color: #f1f5f9; margin-bottom: 8px; }
 .api-box p { color: #94a3b8; font-size: 0.85rem; margin-bottom: 20px; }
 
-/* ── Sidebar ── */
-[data-testid="stSidebar"] {
-    background: #0f1117;
-    border-right: 1px solid #1e293b;
+/* ── Toolbar ── */
+.toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 0;
+    margin-bottom: 8px;
+    border-bottom: 1px solid #1e293b;
 }
-[data-testid="stSidebar"] .stMarkdown { color: #94a3b8; }
+.toolbar-label {
+    font-size: 0.78rem;
+    color: #475569;
+    flex: 1;
+}
+div[data-testid="stHorizontalBlock"] button {
+    background: #1e293b !important;
+    border: 1px solid #334155 !important;
+    color: #94a3b8 !important;
+    border-radius: 8px !important;
+    font-size: 0.8rem !important;
+}
 
 /* Streamlit chat input */
 [data-testid="stChatInput"] textarea {
@@ -414,43 +429,49 @@ def render_sources(hits: list[dict]) -> str:
 
 # ── App ─────────────────────────────────────────────────────────────────────
 
-st.set_page_config(page_title="PE Wiki Q&A", page_icon="⬡", layout="centered", initial_sidebar_state="expanded")
+st.set_page_config(page_title="PE Wiki Q&A", page_icon="⬡", layout="centered", initial_sidebar_state="collapsed")
 st.markdown(CSS, unsafe_allow_html=True)
 
-# Sidebar
-with st.sidebar:
-    st.markdown("### ⬡ PE Wiki Q&A")
-    st.markdown("---")
-    st.markdown("**Notes indexed**")
-    if pathlib.Path(CHROMA_PATH).exists():
-        try:
-            _col = get_collection()
-            st.markdown(f"`{_col.count():,}` notes")
-        except Exception:
-            st.markdown("`—`")
-    st.markdown("**Model**")
-    st.markdown(f"`{MODEL}`")
-    st.markdown("---")
-    if st.button("Clear chat", use_container_width=True):
-        st.session_state.history = []
-        st.rerun()
-    st.markdown("---")
-    st.markdown("**อัปเดต Wiki**")
-    st.markdown("<small style='color:#475569'>เมื่อเพิ่ม/แก้ไข notes ใน Obsidian ให้รันใน Terminal:</small>", unsafe_allow_html=True)
-    st.code("cd ~/GC_External_Factor/wiki-qa\n./update_wiki.sh", language="bash")
-    st.markdown("<small style='color:#475569'>จากนั้นรอ ~2 นาที Streamlit จะ redeploy อัตโนมัติ</small>", unsafe_allow_html=True)
+# ── Header with inline controls ──────────────────────────────────────────────
+note_count = "—"
+if pathlib.Path(CHROMA_PATH).exists():
+    try:
+        note_count = f"{get_collection().count():,}"
+    except Exception:
+        pass
 
-# Header
-st.markdown("""
+st.markdown(f"""
 <div class="wiki-header">
   <div class="icon">⬡</div>
   <div>
     <h1>PE Flexible Packaging — Wiki Q&A</h1>
     <p>ถามคำถามเกี่ยวกับ PE resin · regulations · patents · market intelligence</p>
   </div>
-  <div class="badge">Internal</div>
+  <div style="margin-left:auto;display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0">
+    <div class="badge">Internal</div>
+    <div style="font-size:0.7rem;color:#64748b">{note_count} notes · {MODEL}</div>
+  </div>
 </div>
 """, unsafe_allow_html=True)
+
+# ── Toolbar ──────────────────────────────────────────────────────────────────
+history_len = len(st.session_state.get("history", []))
+col_label, col_clear, col_refresh = st.columns([5, 1, 1])
+with col_label:
+    st.markdown(
+        f'<div style="font-size:0.78rem;color:#475569;padding-top:6px">'
+        f'{"💬 " + str(history_len // 2) + " คำถาม" if history_len else "พิมพ์คำถามด้านล่างเพื่อเริ่มใช้งาน"}'
+        f'</div>',
+        unsafe_allow_html=True
+    )
+with col_clear:
+    if st.button("🗑 ล้างแชท", use_container_width=True):
+        st.session_state.history = []
+        st.rerun()
+with col_refresh:
+    if st.button("🔄 Refresh", use_container_width=True):
+        st.cache_resource.clear()
+        st.rerun()
 
 # DB check
 if not pathlib.Path(CHROMA_PATH).exists():
