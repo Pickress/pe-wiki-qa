@@ -17,7 +17,7 @@ SKIP_DIRS = {"_templates", ".obsidian", ".trash"}
 SKIP_FILES = {"dataview-queries.md"}
 
 
-def parse_note(file_path: Path) -> dict | None:
+def parse_note(file_path: Path) -> list[dict] | None:
     text = file_path.read_text(encoding="utf-8", errors="ignore")
 
     # Split frontmatter
@@ -64,16 +64,38 @@ def parse_note(file_path: Path) -> dict | None:
     if url:
         meta["url"] = str(url)
 
-    # Prepend title to body so it gets embedded with context
-    full_text = f"{meta['title']}\n\n{body}"
+    title = meta["title"]
+    file_md5 = hashlib.md5(str(file_path).encode()).hexdigest()
 
-    doc_id = hashlib.md5(str(file_path).encode()).hexdigest()
-    return {"id": doc_id, "text": full_text[:4000], "meta": meta}
+    # Split at H2/H3 headers so each section gets its own embedding
+    raw_parts = re.split(r'\n(#{2,3} [^\n]+)', body)
+    sections = []
+    if raw_parts[0].strip():
+        sections.append(raw_parts[0])
+    for i in range(1, len(raw_parts), 2):
+        header = raw_parts[i]
+        content = raw_parts[i + 1] if i + 1 < len(raw_parts) else ""
+        sections.append(f"{header}\n{content}")
+
+    chunks = []
+    for idx, section in enumerate(sections):
+        chunk_body = section.strip()
+        if len(chunk_body) < 30:
+            continue
+        chunk_text = f"{title}\n\n{chunk_body}"[:3000]
+        chunks.append({"id": f"{file_md5}_{idx}", "text": chunk_text, "meta": meta})
+
+    return chunks if chunks else None
 
 
 def main():
     client = chromadb.PersistentClient(path=str(CHROMA_PATH))
-    col = client.get_or_create_collection("wiki_notes")
+    # Delete and recreate collection so old single-chunk IDs are removed
+    try:
+        client.delete_collection("wiki_notes")
+    except Exception:
+        pass
+    col = client.create_collection("wiki_notes")
 
     md_files = [
         p for p in VAULT_PATH.rglob("*.md")
@@ -86,13 +108,14 @@ def main():
     ids, docs, metas = [], [], []
     skipped = 0
     for f in md_files:
-        note = parse_note(f)
-        if note is None:
+        chunks = parse_note(f)
+        if chunks is None:
             skipped += 1
             continue
-        ids.append(note["id"])
-        docs.append(note["text"])
-        metas.append(note["meta"])
+        for chunk in chunks:
+            ids.append(chunk["id"])
+            docs.append(chunk["text"])
+            metas.append(chunk["meta"])
 
     # Upsert in batches of 100
     batch = 100
@@ -104,7 +127,7 @@ def main():
         )
         print(f"  Upserted {min(i+batch, len(ids))}/{len(ids)}")
 
-    print(f"Done. {len(ids)} notes indexed, {skipped} skipped.")
+    print(f"Done. {len(ids)} chunks from {len(md_files) - skipped} notes ({skipped} skipped).")
     print(f"ChromaDB stored at: {CHROMA_PATH.resolve()}")
 
 

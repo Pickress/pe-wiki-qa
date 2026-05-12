@@ -325,9 +325,12 @@ def keyword_search(col, keywords: list[str], n: int = 20) -> list[dict]:
         if is_stub(doc):
             continue
         doc_lower = doc.lower()
+        title_lower = meta.get("title", "").lower()
         hits = sum(1 for k in kw_lower if k in doc_lower)
-        if hits > 0:
-            scored.append({"id": doc_id, "text": doc, "meta": meta, "distance": 1 - hits/len(kw_lower), "kw_hits": hits})
+        title_bonus = sum(1 for k in kw_lower if k in title_lower)
+        score = hits + title_bonus
+        if score > 0:
+            scored.append({"id": doc_id, "text": doc, "meta": meta, "distance": 1 - score / (len(kw_lower) * 2), "kw_hits": score})
     scored.sort(key=lambda x: x["kw_hits"], reverse=True)
     return scored[:n]
 
@@ -388,20 +391,21 @@ def build_context(hits: list[dict]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-def ask_claude(client, question: str, query_en: str, context: str) -> str:
-    user_msg = f"""Wiki notes context (retrieved using query: "{query_en}"):
-
-{context}
-
----
-User question (Thai): {question}
-
-Answer the question in Thai based on the context above. Synthesize across all relevant notes."""
-    response = client.messages.create(
+def ask_claude_stream(client, question: str, query_en: str, context: str, history: list):
+    """Stream answer; includes last 3 Q&A turns as conversation memory."""
+    messages = []
+    for msg in history[:-1][-6:]:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": (
+        f'Wiki notes context (query: "{query_en}"):\n\n{context}\n\n---\n'
+        f'คำถาม: {question}\n\nAnswer in Thai based on the context above. Synthesize across all relevant notes.'
+    )})
+    with client.messages.stream(
         model=MODEL, max_tokens=2048, system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_msg}],
-    )
-    return response.content[0].text
+        messages=messages,
+    ) as stream:
+        for text in stream.text_stream:
+            yield text
 
 
 def render_sources(hits: list[dict]) -> str:
@@ -531,10 +535,16 @@ if question:
             hits = search_wiki(col, query, question)
             context = build_context(hits)
 
-        with st.spinner("สังเคราะห์คำตอบ..."):
-            answer = ask_claude(claude, question, query_label, context)
-
-        st.markdown(f'<div class="answer-card">{answer}</div>', unsafe_allow_html=True)
+        answer_box = st.empty()
+        full_answer = ""
+        buf = 0
+        for chunk in ask_claude_stream(claude, question, query_label, context, st.session_state.history):
+            full_answer += chunk
+            buf += len(chunk)
+            if buf >= 25:
+                buf = 0
+                answer_box.markdown(f'<div class="answer-card">{full_answer}▌</div>', unsafe_allow_html=True)
+        answer_box.markdown(f'<div class="answer-card">{full_answer}</div>', unsafe_allow_html=True)
 
         sources_html = render_sources(hits)
         with st.expander(f"Sources — {len(hits)} notes"):
@@ -544,7 +554,7 @@ if question:
 
     st.session_state.history.append({
         "role": "assistant",
-        "content": answer,
+        "content": full_answer,
         "query_en": query_label,
         "sources_html": sources_html,
         "source_count": len(hits),
