@@ -414,7 +414,7 @@ def render_sources(hits: list[dict]) -> str:
 
 # ── App ─────────────────────────────────────────────────────────────────────
 
-st.set_page_config(page_title="PE Wiki Q&A", page_icon="⬡", layout="centered")
+st.set_page_config(page_title="PE Wiki Q&A", page_icon="⬡", layout="centered", initial_sidebar_state="expanded")
 st.markdown(CSS, unsafe_allow_html=True)
 
 # Sidebar
