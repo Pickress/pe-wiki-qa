@@ -324,10 +324,16 @@ def search_wiki(col, query: dict, query_original: str, n: int = N_RESULTS) -> li
 
     merged = {}
 
-    # Phase 1: entity keyword search (force-include notes mentioning the entity)
+    FOLDER_PRIORITY = ["ExxonMobil","Dow","Borealis","Sabic","SCGC","competitors","themes","web-clips","items","2026-W20","2026-W19","2026-W18"]
+
+    # Phase 1: entity keyword search — sort competitor/theme notes first
     if entity and len(entity) > 2:
-        entity_hits = keyword_search(col, [entity], n=8)
-        for item in entity_hits:
+        entity_hits = keyword_search(col, [entity], n=20)
+        entity_hits.sort(key=lambda x: next(
+            (i for i, f in enumerate(FOLDER_PRIORITY) if f.lower() in x["meta"].get("folder","").lower()),
+            99
+        ))
+        for item in entity_hits[:8]:
             merged[item["id"]] = item
 
     # Phase 2: vector search on full query
