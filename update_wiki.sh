@@ -4,16 +4,29 @@
 
 cd "$(dirname "$0")"
 
-echo "📚 Step 1/3 — Re-indexing wiki notes..."
+GRAPH_SRC="/Users/macintosh/Obsidian/External-Intelligence/.understand-anything/knowledge-graph.json"
+GRAPH_DST="./knowledge-graph.json"
+
+echo "📚 Step 1/4 — Re-indexing wiki notes..."
 .venv312/bin/python ingest.py
 
 echo ""
-echo "📦 Step 2/3 — Staging ChromaDB..."
-git add chroma_db/
+echo "🧠 Step 2/4 — Syncing knowledge graph..."
+if [ -f "$GRAPH_SRC" ]; then
+  cp "$GRAPH_SRC" "$GRAPH_DST"
+  echo "   Copied knowledge-graph.json ($(du -h $GRAPH_DST | cut -f1))"
+else
+  echo "   ⚠️  knowledge-graph.json not found — skipping graph sync"
+  echo "   Run /understand-knowledge to regenerate"
+fi
 
 echo ""
-echo "🚀 Step 3/3 — Pushing to GitHub..."
-git commit -m "Update wiki index $(date '+%Y-%m-%d %H:%M')"
+echo "📦 Step 3/4 — Staging files..."
+git add chroma_db/ knowledge-graph.json
+
+echo ""
+echo "🚀 Step 4/4 — Pushing to GitHub..."
+git commit -m "Update wiki index + knowledge graph $(date '+%Y-%m-%d %H:%M')"
 git push
 
 echo ""

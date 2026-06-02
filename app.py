@@ -10,17 +10,64 @@ import anthropic
 import streamlit as st
 
 CHROMA_PATH = "./chroma_db"
+# Cloud: ./knowledge-graph.json (committed to repo)
+# Local dev: Obsidian vault path as fallback
+_LOCAL_GRAPH = "/Users/macintosh/Obsidian/External-Intelligence/.understand-anything/knowledge-graph.json"
+GRAPH_PATH = os.environ.get("GRAPH_PATH", _LOCAL_GRAPH)
 N_RESULTS = 10
 MODEL = "claude-sonnet-4-6"
 
+
+def _find_graph_path() -> pathlib.Path | None:
+    """Resolve knowledge graph path: repo-relative first, then env/local fallback."""
+    import pathlib
+    for p in [pathlib.Path("./knowledge-graph.json"), pathlib.Path(GRAPH_PATH)]:
+        if p.exists():
+            return p
+    return None
+
+
+def _load_graph_json() -> dict:
+    """Load and cache raw knowledge graph JSON. Returns {} on failure."""
+    import json
+    p = _find_graph_path()
+    if not p:
+        return {}
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _load_claims_section() -> tuple[str, int]:
+    """Load verified claims from knowledge graph. Returns (prompt_section, count)."""
+    g = _load_graph_json()
+    if not g:
+        return "", 0
+    claims = [n for n in g.get("nodes", []) if n.get("type") == "claim"]
+    if not claims:
+        return "", 0
+    lines = [f"• {c.get('name', '').strip()}" for c in claims if c.get("name", "").strip()]
+    section = (
+        "3. VERIFIED FACTS (pre-extracted from knowledge graph — treat these as confirmed intelligence):\n"
+        + "\n".join(lines)
+    )
+    return section, len(claims)
+
+
+_CLAIMS_SECTION, CLAIMS_COUNT = _load_claims_section()
+
 SYSTEM_PROMPT = """You are an expert analyst specializing in PE (polyethylene) resin for flexible packaging, with deep knowledge of the global petrochemical and packaging industry.
 
-You have two knowledge sources:
+You have three knowledge sources:
 1. WIKI NOTES — internal intelligence notes retrieved from the team's Obsidian wiki (provided in context)
-2. YOUR OWN EXPERTISE — your training knowledge about PE resin, packaging technology, regulations, and market dynamics
+2. VERIFIED FACTS — pre-extracted claims from the knowledge graph (listed below); treat these as confirmed facts
+3. YOUR OWN EXPERTISE — your training knowledge about PE resin, packaging technology, regulations, and market dynamics
 
 Instructions:
 - ALWAYS prioritize wiki notes — cite them specifically when used
+- Use VERIFIED FACTS directly without hedging — they are pre-confirmed from primary sources
 - NEVER say a company "does not have" a product/technology based on general knowledge alone — wiki may simply not have that note yet; say "ไม่พบใน wiki" instead
 - You may supplement with general knowledge ONLY for context/explanation — never to make definitive claims about competitors
 - Clearly distinguish: use "จากข้อมูลใน wiki..." for wiki-sourced facts and "จากความรู้ทั่วไป (โปรดตรวจสอบ)..." for general knowledge
@@ -28,7 +75,9 @@ Instructions:
 - Synthesize across multiple sources — give a complete, useful answer
 - Structure with clear sections for complex topics
 - Present comparisons as tables
-- Be direct and actionable — this is for a professional PE resin business team"""
+- Be direct and actionable — this is for a professional PE resin business team
+
+""" + _CLAIMS_SECTION
 
 TRANSLATE_PROMPT = """You are a search query optimizer for a PE resin and flexible packaging intelligence wiki.
 Convert the user's question (may be in Thai or English) into TWO separate search queries as JSON:
@@ -285,6 +334,34 @@ def folder_badge_html(folder: str) -> str:
 
 
 @st.cache_resource
+def get_graph_index() -> tuple[dict, dict, dict]:
+    """Build adjacency index from knowledge graph for graph-augmented retrieval.
+    Returns (article_names: {name_lower→id}, adjacency: {id→[neighbor_ids]}, nodes: {id→node})
+    """
+    g = _load_graph_json()
+    if not g:
+        return {}, {}, {}
+    nodes = {n["id"]: n for n in g.get("nodes", [])}
+    article_names = {
+        n["name"].lower(): n["id"]
+        for n in g.get("nodes", [])
+        if n.get("type") == "article"
+    }
+    adjacency: dict[str, list[str]] = {}
+    for e in g.get("edges", []):
+        s, t = e.get("source", ""), e.get("target", "")
+        if s in nodes and t in nodes:
+            if nodes[s].get("type") == "article" and nodes[t].get("type") == "article":
+                adjacency.setdefault(s, [])
+                adjacency.setdefault(t, [])
+                if t not in adjacency[s]:
+                    adjacency[s].append(t)
+                if s not in adjacency[t]:
+                    adjacency[t].append(s)
+    return article_names, adjacency, nodes
+
+
+@st.cache_resource
 def get_collection():
     client = chromadb.PersistentClient(path=CHROMA_PATH)
     return client.get_collection("wiki_notes")
@@ -374,7 +451,33 @@ def search_wiki(col, query: dict, query_original: str, n: int = N_RESULTS) -> li
         if item["id"] not in merged:
             merged[item["id"]] = item
 
-    return list(merged.values())[:n]
+    hits = list(merged.values())[:n]
+
+    # Phase 4: graph expansion — walk knowledge graph edges from top hits
+    article_names_idx, adjacency, graph_nodes = get_graph_index()
+    if article_names_idx:
+        neighbor_names: set[str] = set()
+        for hit in hits[:5]:
+            title = hit["meta"].get("title", "").lower()
+            node_id = article_names_idx.get(title)
+            if node_id and node_id in adjacency:
+                for neighbor_id in adjacency[node_id][:3]:
+                    n_name = graph_nodes.get(neighbor_id, {}).get("name", "")
+                    if n_name:
+                        neighbor_names.add(n_name)
+        existing_ids = {h["id"] for h in hits}
+        added = 0
+        for name in list(neighbor_names)[:6]:
+            if added >= 3:
+                break
+            extras = keyword_search(col, [name], n=1)
+            for item in extras:
+                if item["id"] not in existing_ids:
+                    hits.append(item)
+                    existing_ids.add(item["id"])
+                    added += 1
+
+    return hits
 
 
 def build_context(hits: list[dict]) -> str:
@@ -433,7 +536,7 @@ def render_sources(hits: list[dict]) -> str:
 
 # ── App ─────────────────────────────────────────────────────────────────────
 
-st.set_page_config(page_title="PE Wiki Q&A", page_icon="⬡", layout="centered", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="PE Wiki Q&A", page_icon="⬡", layout="centered", initial_sidebar_state="expanded")
 st.markdown(CSS, unsafe_allow_html=True)
 
 # ── Header with inline controls ──────────────────────────────────────────────
@@ -453,7 +556,7 @@ st.markdown(f"""
   </div>
   <div style="margin-left:auto;display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0">
     <div class="badge">Internal</div>
-    <div style="font-size:0.7rem;color:#64748b">{note_count} notes · {MODEL}</div>
+    <div style="font-size:0.7rem;color:#64748b">{note_count} notes · {CLAIMS_COUNT} facts · {MODEL}</div>
   </div>
 </div>
 """, unsafe_allow_html=True)
